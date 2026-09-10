@@ -12,7 +12,7 @@ use std::{
 	io::Write,
 	process::Command,
 };
-use tempdir::TempDir;
+use tempfile::Builder;
 
 /// Represents an alpine repository
 #[derive(Debug)]
@@ -48,17 +48,18 @@ pub(crate) async fn upload(
 	mut payload: Multipart,
 	config: web::Data<Config>,
 ) -> Result<HttpResponse, Error> {
-	let temp_dir = TempDir::new("reposerve")?;
+	let temp_dir = Builder::new().prefix("reposerve").tempdir()?;
 
 	// iterate over multipart stream
 	let mut info = ApkInfo::default();
 	let mut files = Vec::new();
 	while let Ok(Some(mut field)) = payload.try_next().await {
+		let cd = field.content_disposition();
 		// handle named fields
-		match field.content_disposition().get_name() {
+		match cd.as_ref().and_then(|cd| cd.get_name()) {
 			// save file to tmp dir
 			Some("file") => {
-				if let Some(filename) = field.content_disposition().get_filename() {
+				if let Some(filename) = cd.as_ref().and_then(|cd| cd.get_filename()) {
 					let sane_file = sanitize(filename);
 					let filepath = temp_dir.path().join(&sane_file);
 					log::info!("saving {}", filepath.display());
