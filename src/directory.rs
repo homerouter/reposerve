@@ -21,7 +21,10 @@ impl DirEntry {
 				return Some(DirEntry {
 					name: escape_html_entity(&entry.file_name().to_string_lossy()).to_string(),
 					url: utf8_percent_encode(&base.join(p).to_string_lossy(), CONTROLS).to_string(),
-					dt: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH).into(),
+					dt: metadata
+						.modified()
+						.unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+						.into(),
 					len: metadata.len(),
 					is_dir: metadata.is_dir(),
 				});

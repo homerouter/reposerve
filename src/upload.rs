@@ -122,31 +122,54 @@ pub(crate) async fn upload(
 			if let Some(ext) = path.extension() {
 				let metadata = fs::metadata(&path)?;
 				if metadata.is_file() && ext == "apk" {
-					apk_args.push(String::from(path.file_name().unwrap().to_str().unwrap()));
+					let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+						std::io::Error::new(
+							std::io::ErrorKind::InvalidData,
+							format!("non-utf8 or invalid file name for apk: {:?}", path),
+						)
+					})?;
+					apk_args.push(file_name.to_owned());
 				}
 			}
 		}
-		let cmd = Command::new("/sbin/apk")
+		let output = Command::new("/sbin/apk")
 			.current_dir(&root)
 			.args(&apk_args)
-			.output();
-		match cmd {
-			Ok(output) => log::info!("apk: {}", String::from_utf8_lossy(&output.stdout)),
-			Err(e) => log::error!("Error when running apk: {:?}", e),
+			.output()?;
+		if !output.status.success() {
+			let stderr = String::from_utf8_lossy(&output.stderr);
+			log::error!("apk failed with status {:?}: {}", output.status, stderr);
+			return Err(std::io::Error::new(
+				std::io::ErrorKind::Other,
+				format!(
+					"apk index failed with status {:?}: {}",
+					output.status, stderr
+				),
+			));
 		}
+		log::info!("apk: {}", String::from_utf8_lossy(&output.stdout));
 
 		// call abuild-sign to sign generated index
-		let cmd = Command::new("/usr/bin/abuild-sign")
+		let output = Command::new("/usr/bin/abuild-sign")
 			.current_dir(&root)
 			.args(["APKINDEX.tar.gz"])
-			.output();
-		match cmd {
-			Ok(output) => log::info!(
-				"abuild-sign: {}",
-				String::from_utf8_lossy(&output.stdout)
-			),
-			Err(e) => log::error!("Error when running abuild-sign: {:?}", e),
+			.output()?;
+		if !output.status.success() {
+			let stderr = String::from_utf8_lossy(&output.stderr);
+			log::error!(
+				"abuild-sign failed with status {:?}: {}",
+				output.status,
+				stderr
+			);
+			return Err(std::io::Error::new(
+				std::io::ErrorKind::Other,
+				format!(
+					"abuild-sign failed with status {:?}: {}",
+					output.status, stderr
+				),
+			));
 		}
+		log::info!("abuild-sign: {}", String::from_utf8_lossy(&output.stdout));
 		Ok(())
 	})
 	.await
