@@ -7,12 +7,9 @@ use actix_web::{
 };
 use futures::{StreamExt, TryStreamExt};
 use sanitize_filename::sanitize;
-use std::{
-	fs::{self, File},
-	io::Write,
-	process::Command,
-};
+use std::{fs, process::Command};
 use tempfile::Builder;
+use tokio::io::AsyncWriteExt;
 
 /// Represents an alpine repository
 #[derive(Debug)]
@@ -65,15 +62,14 @@ pub(crate) async fn upload(
 					log::info!("saving {}", filepath.display());
 					files.push(sane_file);
 
-					// File::create is blocking operation (TODO: use threadpool)
-					let mut f = web::block(|| File::create(filepath)).await??;
+					let mut f = tokio::fs::File::create(&filepath).await?;
 
 					// File data is a stream of *Bytes*
 					while let Some(chunk) = field.next().await {
-						let data = chunk.unwrap();
-						// filesystem operations are blocking (TODO: to use a threadpool)
-						f = web::block(move || f.write_all(&data).map(|_| f)).await??;
+						let data = chunk?;
+						f.write_all(&data).await?;
 					}
+					f.flush().await?;
 				}
 			}
 			// get repo parameters (for moving the files to the right place)
@@ -83,9 +79,9 @@ pub(crate) async fn upload(
 				let field_name = f.to_owned();
 				// Field value is a stream of *Bytes*
 				while let Some(chunk) = field.next().await {
-					data.put(chunk.unwrap());
+					data.put(chunk?);
 				}
-				info.set(&field_name, std::str::from_utf8(&data).unwrap().to_string());
+				info.set(&field_name, String::from_utf8_lossy(&data).into_owned());
 			}
 			// ignore the rest
 			_ => (),
@@ -96,56 +92,65 @@ pub(crate) async fn upload(
 	let mut root = config.dir.join(sanitize(&info.version));
 	root.push(sanitize(&info.repo));
 	root.push(sanitize(&info.arch));
-	fs::create_dir_all(&root)?;
 
-	// move files to correct destinations when we have all the info
-	for file in files {
-		let src = temp_dir.path().join(&file);
-		let dst = root.join(&file);
-		fs::copy(&src, &dst)?;
-	}
+	let temp_dir_path = temp_dir.path().to_path_buf();
+	let info_arch = info.arch.clone();
+	web::block(move || -> std::io::Result<()> {
+		fs::create_dir_all(&root)?;
 
-	// call apk to index all .apk files in root
-	let mut apk_args: Vec<String> = [
-		"index",
-		"-o",
-		"APKINDEX.tar.gz",
-		"--rewrite-arch",
-		&info.arch,
-	]
-	.iter()
-	.map(|s| s.to_string())
-	.collect();
-	for entry in fs::read_dir(&root)? {
-		let entry = entry?;
-		let path = entry.path();
-		if let Some(ext) = path.extension() {
-			let metadata = fs::metadata(&path)?;
-			if metadata.is_file() && ext == "apk" {
-				apk_args.push(String::from(path.file_name().unwrap().to_str().unwrap()));
+		// move files to correct destinations when we have all the info
+		for file in files {
+			let src = temp_dir_path.join(&file);
+			let dst = root.join(&file);
+			fs::copy(&src, &dst)?;
+		}
+
+		// call apk to index all .apk files in root
+		let mut apk_args: Vec<String> = [
+			"index",
+			"-o",
+			"APKINDEX.tar.gz",
+			"--rewrite-arch",
+			&info_arch,
+		]
+		.iter()
+		.map(|s| s.to_string())
+		.collect();
+		for entry in fs::read_dir(&root)? {
+			let entry = entry?;
+			let path = entry.path();
+			if let Some(ext) = path.extension() {
+				let metadata = fs::metadata(&path)?;
+				if metadata.is_file() && ext == "apk" {
+					apk_args.push(String::from(path.file_name().unwrap().to_str().unwrap()));
+				}
 			}
 		}
-	}
-	let cmd = Command::new("/sbin/apk")
-		.current_dir(&root)
-		.args(&apk_args)
-		.output();
-	match cmd {
-		Ok(output) => log::info!("apk: {}", std::str::from_utf8(&output.stdout).unwrap_or("")),
-		Err(e) => log::error!("Error when running apk: {:?}", e),
-	}
+		let cmd = Command::new("/sbin/apk")
+			.current_dir(&root)
+			.args(&apk_args)
+			.output();
+		match cmd {
+			Ok(output) => log::info!("apk: {}", String::from_utf8_lossy(&output.stdout)),
+			Err(e) => log::error!("Error when running apk: {:?}", e),
+		}
 
-	// call abuild-sign to sign generated index
-	let cmd = Command::new("/usr/bin/abuild-sign")
-		.current_dir(&root)
-		.args(["APKINDEX.tar.gz"])
-		.output();
-	match cmd {
-		Ok(output) => log::info!(
-			"abuild-sign: {}",
-			std::str::from_utf8(&output.stdout).unwrap_or("")
-		),
-		Err(e) => log::error!("Error when running abuild-sign: {:?}", e),
-	}
-	Ok(HttpResponse::Ok().into())
+		// call abuild-sign to sign generated index
+		let cmd = Command::new("/usr/bin/abuild-sign")
+			.current_dir(&root)
+			.args(["APKINDEX.tar.gz"])
+			.output();
+		match cmd {
+			Ok(output) => log::info!(
+				"abuild-sign: {}",
+				String::from_utf8_lossy(&output.stdout)
+			),
+			Err(e) => log::error!("Error when running abuild-sign: {:?}", e),
+		}
+		Ok(())
+	})
+	.await
+	.map_err(actix_web::error::ErrorInternalServerError)??;
+
+	Ok(HttpResponse::Ok().finish())
 }

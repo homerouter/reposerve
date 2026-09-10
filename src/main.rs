@@ -18,7 +18,7 @@ use actix_web::{
 };
 use anyhow::{anyhow, Context};
 use rustls::{Certificate, PrivateKey, ServerConfig};
-use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
+use rustls_pemfile::{certs, ec_private_keys, pkcs8_private_keys, rsa_private_keys};
 use std::{fs::File, io::BufReader};
 
 async fn serve(
@@ -125,6 +125,12 @@ async fn serve(
 						.map_err(invalid_key)
 						// return an error if there is no key
 						.and_then(|x| (!x.is_empty()).then_some(x).ok_or_else(no_key))
+				})
+				.or_else(|_| {
+					ec_private_keys(&mut BufReader::new(File::open(&tls.key)?))
+						.map_err(invalid_key)
+						// return an error if there is no key
+						.and_then(|x| (!x.is_empty()).then_some(x).ok_or_else(no_key))
 				})?
 				.into_iter()
 				.map(PrivateKey)
@@ -165,9 +171,13 @@ fn main() -> anyhow::Result<()> {
 	let opts: Opts = args::from_env();
 
 	// setup logging
+	let default_level = if opts.verbose { "debug" } else { "info" };
+	let default_filter = format!(
+		"reposerve={default_level},actix_web={default_level},actix_schemeredirect_middleware={default_level},actix-token-middleware={default_level}"
+	);
 	env_logger::init_from_env(
 		env_logger::Env::new()
-			.default_filter_or("reposerve=info,actix_web=info,actix_schemeredirect_middleware=info,actix-token-middleware=info")
+			.default_filter_or(default_filter)
 			.default_write_style_or("auto"),
 	);
 	log::info!("{} v{}", env!("CARGO_BIN_NAME"), env!("CARGO_PKG_VERSION"));
