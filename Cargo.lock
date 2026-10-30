@@ -1749,7 +1749,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reposerve"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "actix-files",
  "actix-multipart",
@@ -1770,7 +1770,6 @@ dependencies = [
  "serde_yaml",
  "size_format",
  "tempfile",
- "time",
  "tokio",
  "v_htmlescape",
 ]

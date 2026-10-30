@@ -5,7 +5,11 @@ mod upload;
 mod webhook;
 
 use crate::{
-	args::Opts, config::Config, directory::directory_listing, upload::upload, webhook::webhook,
+	args::Opts,
+	config::Config,
+	directory::directory_listing,
+	upload::{upload, UploadLock},
+	webhook::webhook,
 };
 
 use actix_files::Files;
@@ -40,6 +44,8 @@ async fn serve(
 	}
 	// copy some values before config is moved
 	let tls = config.tls.clone();
+	// ponytail: global upload lock; shard per version/repo/arch if concurrent upload throughput matters
+	let upload_lock = Data::new(UploadLock::new(()));
 
 	// build the server
 	let server = HttpServer::new(move || {
@@ -65,7 +71,8 @@ async fn serve(
 		let mut app = App::new()
 			.wrap(Logger::default())
 			.wrap(redirect_service)
-			.app_data(Data::new(config.clone()));
+			.app_data(Data::new(config.clone()))
+			.app_data(upload_lock.clone());
 
 		// wrap /webhook and /upload inside JwtAuth if jwt is set
 		if let Some(ref jwt) = config.jwt {
@@ -105,42 +112,21 @@ async fn serve(
 			.with_no_client_auth();
 
 		let crt_chain = certs(&mut BufReader::new(
-			File::open(&tls.crt).with_context(|| format!("unable to read {:?}", &tls.crt))?,
+			File::open(&tls.crt).with_context(|| format!("unable to read {:?}", tls.crt))?,
 		))
 		.map_err(|_| anyhow!("error reading certificate"))?
 		.into_iter()
 		.map(Certificate)
 		.collect();
 
-		// Parse the key in RSA or PKCS8 format
-		let invalid_key = |_| anyhow!("invalid key in {:?}", &tls.key);
-		let no_key = || anyhow!("no key found in {:?}", &tls.key);
-		let mut keys: Vec<PrivateKey> =
-			rsa_private_keys(&mut BufReader::new(File::open(&tls.key)?))
-				.map_err(invalid_key)
-				// return an error if there is no key
-				.and_then(|x| (!x.is_empty()).then_some(x).ok_or_else(no_key))
-				.or_else(|_| {
-					pkcs8_private_keys(&mut BufReader::new(File::open(&tls.key)?))
-						.map_err(invalid_key)
-						// return an error if there is no key
-						.and_then(|x| (!x.is_empty()).then_some(x).ok_or_else(no_key))
-				})
-				.or_else(|_| {
-					ec_private_keys(&mut BufReader::new(File::open(&tls.key)?))
-						.map_err(invalid_key)
-						// return an error if there is no key
-						.and_then(|x| (!x.is_empty()).then_some(x).ok_or_else(no_key))
-				})?
-				.into_iter()
-				.map(PrivateKey)
-				.collect();
+		// Parse the key in RSA, PKCS8, or EC format
+		let key = load_private_key(&tls.key)?;
 		let tls_config = config
-			.with_single_cert(crt_chain, keys.swap_remove(0))
+			.with_single_cert(crt_chain, key)
 			.with_context(|| "error setting crt/key pair")?;
 		server
 			.bind_rustls(&addrs, tls_config)
-			.with_context(|| format!("unable to bind to https://{}", &addrs))?
+			.with_context(|| format!("unable to bind to https://{addrs}"))?
 	} else {
 		log::warn!("TLS is not activated. Use only for development");
 		server
@@ -150,20 +136,50 @@ async fn serve(
 	server = if !secure {
 		server
 			.bind(&addr)
-			.with_context(|| format!("unable to bind to http://{}", &addr))?
+			.with_context(|| format!("unable to bind to http://{addr}"))?
 	} else {
 		server
 	};
 
 	if !secure {
-		log::info!("listening on http://{}", &addr);
+		log::info!("listening on http://{addr}");
 	}
 	if tls.is_some() {
-		log::info!("listening on https://{}", &addrs);
+		log::info!("listening on https://{addrs}");
 	}
 
 	server.run().await?;
 	Ok(())
+}
+
+fn load_private_key(path: &std::path::Path) -> anyhow::Result<PrivateKey> {
+	let key_bytes = std::fs::read(path).with_context(|| format!("unable to read {path:?}"))?;
+	let invalid_key = |_| anyhow!("invalid key in {path:?}");
+	let no_key = || anyhow!("no key found in {path:?}");
+	let mut keys: Vec<PrivateKey> = rsa_private_keys(&mut key_bytes.as_slice())
+		.map_err(invalid_key)
+		.and_then(|x| (!x.is_empty()).then_some(x).ok_or_else(no_key))
+		.or_else(|_| {
+			pkcs8_private_keys(&mut key_bytes.as_slice())
+				.map_err(invalid_key)
+				.and_then(|x| (!x.is_empty()).then_some(x).ok_or_else(no_key))
+		})
+		.or_else(|_| {
+			ec_private_keys(&mut key_bytes.as_slice())
+				.map_err(invalid_key)
+				.and_then(|x| (!x.is_empty()).then_some(x).ok_or_else(no_key))
+		})?
+		.into_iter()
+		.map(PrivateKey)
+		.collect();
+	Ok(keys.swap_remove(0))
+}
+
+fn default_log_filter(verbose: bool) -> String {
+	let default_level = if verbose { "debug" } else { "info" };
+	format!(
+		"reposerve={default_level},actix_web={default_level},actix_schemeredirect_middleware={default_level},actix_token_middleware={default_level}"
+	)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -171,10 +187,7 @@ fn main() -> anyhow::Result<()> {
 	let opts: Opts = args::from_env();
 
 	// setup logging
-	let default_level = if opts.verbose { "debug" } else { "info" };
-	let default_filter = format!(
-		"reposerve={default_level},actix_web={default_level},actix_schemeredirect_middleware={default_level},actix-token-middleware={default_level}"
-	);
+	let default_filter = default_log_filter(opts.verbose);
 	env_logger::init_from_env(
 		env_logger::Env::new()
 			.default_filter_or(default_filter)
@@ -189,4 +202,27 @@ fn main() -> anyhow::Result<()> {
 	let system = actix_web::rt::System::new();
 	system.block_on(serve(config, opts.secure, opts.addr, opts.addrs, opts.dev))?;
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::path::Path;
+
+	#[test]
+	fn missing_tls_key_error_names_the_key_path() {
+		let err = load_private_key(Path::new("/nonexistent/missing-tls.key")).unwrap_err();
+		let msg = format!("{err:#}");
+		assert!(
+			msg.contains("missing-tls.key"),
+			"expected missing key path in error, got: {msg}"
+		);
+	}
+
+	#[test]
+	fn default_log_filter_uses_valid_rust_module_target_names() {
+		let filter = default_log_filter(true);
+		assert!(filter.contains("actix_token_middleware=debug"));
+		assert!(!filter.contains("actix-token-middleware"));
+	}
 }

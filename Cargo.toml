@@ -1,7 +1,7 @@
 [package]
 name = "reposerve"
 description = "Simple Alpine Linux packages server you can use to consume and upload private packages in CI/CD pipelines."
-version = "0.7.1"
+version = "0.7.2"
 authors = ["Éric BURGHARD <eric.burghard@itsufficient.me>"]
 edition = "2021"
 
@@ -26,8 +26,7 @@ v_htmlescape = "0.15"
 actix-token-middleware = "0.3.0"
 actix-schemeredirect-middleware = "0.2"
 rustls-pemfile = "1.0"
-time = "0.3"
-tokio = { version = "1", features = ["fs", "io-util"] }
+tokio = { version = "1", features = ["fs", "io-util", "process", "sync", "time"] }
 
 [patch.crates-io]
 actix-schemeredirect-middleware = { git = "https://github.com/eburghar/actix-schemeredirect-middleware.git", branch = "master" }
