@@ -4,7 +4,7 @@ use chrono::{offset::Utc, DateTime};
 use percent_encoding::{utf8_percent_encode, CONTROLS};
 use size_format::SizeFormatterBinary;
 use std::{fmt::Write, io, path::Path};
-use v_htmlescape::escape as escape_html_entity;
+use v_htmlescape::escape_fmt as escape_html_entity;
 
 struct DirEntry {
 	name: String,

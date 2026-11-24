@@ -21,9 +21,10 @@ use actix_web::{
 	App, HttpServer,
 };
 use anyhow::{anyhow, Context};
-use rustls::{Certificate, PrivateKey, ServerConfig};
-use rustls_pemfile::{certs, ec_private_keys, pkcs8_private_keys, rsa_private_keys};
-use std::{fs::File, io::BufReader};
+use rustls::{
+	pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
+	ServerConfig,
+};
 
 async fn serve(
 	mut config: Config,
@@ -107,25 +108,18 @@ async fn serve(
 			log::info!("send HSTS header: {:?}", hsts.to_string());
 		}
 		// Create tls config
-		let config = ServerConfig::builder()
-			.with_safe_defaults()
-			.with_no_client_auth();
-
-		let crt_chain = certs(&mut BufReader::new(
-			File::open(&tls.crt).with_context(|| format!("unable to read {:?}", tls.crt))?,
-		))
-		.map_err(|_| anyhow!("error reading certificate"))?
-		.into_iter()
-		.map(Certificate)
-		.collect();
-
+		let crt_chain = CertificateDer::pem_file_iter(&tls.crt)
+			.with_context(|| format!("unable to read {:?}", tls.crt))?
+			.collect::<Result<Vec<_>, _>>()
+			.map_err(|e| anyhow!("error reading certificate: {e}"))?;
 		// Parse the key in RSA, PKCS8, or EC format
 		let key = load_private_key(&tls.key)?;
-		let tls_config = config
+		let tls_config = ServerConfig::builder()
+			.with_no_client_auth()
 			.with_single_cert(crt_chain, key)
 			.with_context(|| "error setting crt/key pair")?;
 		server
-			.bind_rustls(&addrs, tls_config)
+			.bind_rustls_0_23(&addrs, tls_config)
 			.with_context(|| format!("unable to bind to https://{addrs}"))?
 	} else {
 		log::warn!("TLS is not activated. Use only for development");
@@ -152,27 +146,9 @@ async fn serve(
 	Ok(())
 }
 
-fn load_private_key(path: &std::path::Path) -> anyhow::Result<PrivateKey> {
-	let key_bytes = std::fs::read(path).with_context(|| format!("unable to read {path:?}"))?;
-	let invalid_key = |_| anyhow!("invalid key in {path:?}");
-	let no_key = || anyhow!("no key found in {path:?}");
-	let mut keys: Vec<PrivateKey> = rsa_private_keys(&mut key_bytes.as_slice())
-		.map_err(invalid_key)
-		.and_then(|x| (!x.is_empty()).then_some(x).ok_or_else(no_key))
-		.or_else(|_| {
-			pkcs8_private_keys(&mut key_bytes.as_slice())
-				.map_err(invalid_key)
-				.and_then(|x| (!x.is_empty()).then_some(x).ok_or_else(no_key))
-		})
-		.or_else(|_| {
-			ec_private_keys(&mut key_bytes.as_slice())
-				.map_err(invalid_key)
-				.and_then(|x| (!x.is_empty()).then_some(x).ok_or_else(no_key))
-		})?
-		.into_iter()
-		.map(PrivateKey)
-		.collect();
-	Ok(keys.swap_remove(0))
+fn load_private_key(path: &std::path::Path) -> anyhow::Result<PrivateKeyDer<'static>> {
+	// first key found in RSA, PKCS8 or EC (SEC1) format
+	PrivateKeyDer::from_pem_file(path).map_err(|e| anyhow!("invalid or no key in {path:?}: {e}"))
 }
 
 fn default_log_filter(verbose: bool) -> String {
