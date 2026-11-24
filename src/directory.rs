@@ -101,3 +101,40 @@ pub fn directory_listing(dir: &Directory, req: &HttpRequest) -> Result<ServiceRe
 			.body(html),
 	))
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use actix_files::Files;
+	use actix_web::{http::StatusCode, test, App};
+	use std::fs;
+
+	#[test]
+	fn directory_listing_renders_visible_files_and_hides_dotfiles() {
+		actix_web::rt::System::new().block_on(async {
+			let dir = tempfile::tempdir().unwrap();
+			let sub = dir.path().join("edge");
+			fs::create_dir(&sub).unwrap();
+			fs::write(sub.join("pkg-1.0.apk"), "abc").unwrap();
+			fs::write(sub.join("a<b.apk"), "x").unwrap();
+			fs::create_dir(sub.join(".stage-1234")).unwrap();
+
+			let app = test::init_service(
+				App::new().service(
+					Files::new("/", dir.path())
+						.show_files_listing()
+						.files_listing_renderer(directory_listing),
+				),
+			)
+			.await;
+
+			let req = test::TestRequest::get().uri("/edge/").to_request();
+			let resp = test::call_service(&app, req).await;
+			assert_eq!(resp.status(), StatusCode::OK);
+			let html = String::from_utf8_lossy(&test::read_body(resp).await).into_owned();
+			assert!(html.contains("pkg-1.0.apk"));
+			assert!(html.contains("a&lt;b.apk"));
+			assert!(!html.contains(".stage-1234"));
+		});
+	}
+}

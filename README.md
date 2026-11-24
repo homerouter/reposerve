@@ -20,7 +20,7 @@ integrated alpine packages in the fabric of container images with CI/CD pipeline
 # Usage
 
 ```
-reposerve 0.7.0
+reposerve 0.7.2
 
 Usage: reposerve [-c <config>] [-d] [-v] [-l <addr>] [-L <addrs>] [-S]
 
@@ -72,7 +72,7 @@ extra webhook).
 
 # Configuration
 
-A `jwt` configuration has to be provided in the configuration for the `/upload` and `/webhooks`
+A `jwt` configuration has to be provided in the configuration for the `/upload` and `/webhook`
 unless the dev mode is activated. You need to give the URL to retrieve the public keys (`jwks`) that
 sign the JWT Tokens and a map of claims with their expected values the token must comply with, to be
 allowed to upload files to the repository.
@@ -100,12 +100,12 @@ tls:
     duration: 300 # duration in s
     include_subdomains: true
     preload: false
-# protect /upload and /webhooks with a JWT token
+# protect /upload and /webhook with a JWT token
 jwt:
   jwks: https://gitlab.com/-/jwks
   claims:
     iss: gitlab.com
-# webhooks definition under /webhooks/..
+# webhooks definition under /webhook/..
 webhooks:
   sign: /usr/bin/apk_sign.sh
 ```

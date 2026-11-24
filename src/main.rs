@@ -5,7 +5,11 @@ mod upload;
 mod webhook;
 
 use crate::{
-	args::Opts, config::Config, directory::directory_listing, upload::upload, webhook::webhook,
+	args::Opts,
+	config::Config,
+	directory::directory_listing,
+	upload::{upload, UploadLock},
+	webhook::webhook,
 };
 
 use actix_files::Files;
@@ -41,6 +45,8 @@ async fn serve(
 	}
 	// copy some values before config is moved
 	let tls = config.tls.clone();
+	// ponytail: global upload lock; shard per version/repo/arch if concurrent upload throughput matters
+	let upload_lock = Data::new(UploadLock::new(()));
 
 	// build the server
 	let server = HttpServer::new(move || {
@@ -66,7 +72,8 @@ async fn serve(
 		let mut app = App::new()
 			.wrap(Logger::default())
 			.wrap(redirect_service)
-			.app_data(Data::new(config.clone()));
+			.app_data(Data::new(config.clone()))
+			.app_data(upload_lock.clone());
 
 		// wrap /webhook and /upload inside JwtAuth if jwt is set
 		if let Some(ref jwt) = config.jwt {
@@ -102,19 +109,18 @@ async fn serve(
 		}
 		// Create tls config
 		let crt_chain = CertificateDer::pem_file_iter(&tls.crt)
-			.with_context(|| format!("unable to read {:?}", &tls.crt))?
+			.with_context(|| format!("unable to read {:?}", tls.crt))?
 			.collect::<Result<Vec<_>, _>>()
-			.map_err(|e| anyhow!("error reading certificate: {}", e))?;
-		// first key found in RSA, PKCS8 or EC (SEC1) format
-		let key = PrivateKeyDer::from_pem_file(&tls.key)
-			.map_err(|e| anyhow!("invalid or no key in {:?}: {}", &tls.key, e))?;
+			.map_err(|e| anyhow!("error reading certificate: {e}"))?;
+		// Parse the key in RSA, PKCS8, or EC format
+		let key = load_private_key(&tls.key)?;
 		let tls_config = ServerConfig::builder()
 			.with_no_client_auth()
 			.with_single_cert(crt_chain, key)
 			.with_context(|| "error setting crt/key pair")?;
 		server
 			.bind_rustls_0_23(&addrs, tls_config)
-			.with_context(|| format!("unable to bind to https://{}", &addrs))?
+			.with_context(|| format!("unable to bind to https://{addrs}"))?
 	} else {
 		log::warn!("TLS is not activated. Use only for development");
 		server
@@ -124,20 +130,32 @@ async fn serve(
 	server = if !secure {
 		server
 			.bind(&addr)
-			.with_context(|| format!("unable to bind to http://{}", &addr))?
+			.with_context(|| format!("unable to bind to http://{addr}"))?
 	} else {
 		server
 	};
 
 	if !secure {
-		log::info!("listening on http://{}", &addr);
+		log::info!("listening on http://{addr}");
 	}
 	if tls.is_some() {
-		log::info!("listening on https://{}", &addrs);
+		log::info!("listening on https://{addrs}");
 	}
 
 	server.run().await?;
 	Ok(())
+}
+
+fn load_private_key(path: &std::path::Path) -> anyhow::Result<PrivateKeyDer<'static>> {
+	// first key found in RSA, PKCS8 or EC (SEC1) format
+	PrivateKeyDer::from_pem_file(path).map_err(|e| anyhow!("invalid or no key in {path:?}: {e}"))
+}
+
+fn default_log_filter(verbose: bool) -> String {
+	let default_level = if verbose { "debug" } else { "info" };
+	format!(
+		"reposerve={default_level},actix_web={default_level},actix_schemeredirect_middleware={default_level},actix_token_middleware={default_level}"
+	)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -145,10 +163,7 @@ fn main() -> anyhow::Result<()> {
 	let opts: Opts = args::from_env();
 
 	// setup logging
-	let default_level = if opts.verbose { "debug" } else { "info" };
-	let default_filter = format!(
-		"reposerve={default_level},actix_web={default_level},actix_schemeredirect_middleware={default_level},actix-token-middleware={default_level}"
-	);
+	let default_filter = default_log_filter(opts.verbose);
 	env_logger::init_from_env(
 		env_logger::Env::new()
 			.default_filter_or(default_filter)
@@ -163,4 +178,27 @@ fn main() -> anyhow::Result<()> {
 	let system = actix_web::rt::System::new();
 	system.block_on(serve(config, opts.secure, opts.addr, opts.addrs, opts.dev))?;
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::path::Path;
+
+	#[test]
+	fn missing_tls_key_error_names_the_key_path() {
+		let err = load_private_key(Path::new("/nonexistent/missing-tls.key")).unwrap_err();
+		let msg = format!("{err:#}");
+		assert!(
+			msg.contains("missing-tls.key"),
+			"expected missing key path in error, got: {msg}"
+		);
+	}
+
+	#[test]
+	fn default_log_filter_uses_valid_rust_module_target_names() {
+		let filter = default_log_filter(true);
+		assert!(filter.contains("actix_token_middleware=debug"));
+		assert!(!filter.contains("actix-token-middleware"));
+	}
 }
