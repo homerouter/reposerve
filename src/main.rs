@@ -17,9 +17,10 @@ use actix_web::{
 	App, HttpServer,
 };
 use anyhow::{anyhow, Context};
-use rustls::{Certificate, PrivateKey, ServerConfig};
-use rustls_pemfile::{certs, ec_private_keys, pkcs8_private_keys, rsa_private_keys};
-use std::{fs::File, io::BufReader};
+use rustls::{
+	pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
+	ServerConfig,
+};
 
 async fn serve(
 	mut config: Config,
@@ -100,46 +101,19 @@ async fn serve(
 			log::info!("send HSTS header: {:?}", hsts.to_string());
 		}
 		// Create tls config
-		let config = ServerConfig::builder()
-			.with_safe_defaults()
-			.with_no_client_auth();
-
-		let crt_chain = certs(&mut BufReader::new(
-			File::open(&tls.crt).with_context(|| format!("unable to read {:?}", &tls.crt))?,
-		))
-		.map_err(|_| anyhow!("error reading certificate"))?
-		.into_iter()
-		.map(Certificate)
-		.collect();
-
-		// Parse the key in RSA or PKCS8 format
-		let invalid_key = |_| anyhow!("invalid key in {:?}", &tls.key);
-		let no_key = || anyhow!("no key found in {:?}", &tls.key);
-		let mut keys: Vec<PrivateKey> =
-			rsa_private_keys(&mut BufReader::new(File::open(&tls.key)?))
-				.map_err(invalid_key)
-				// return an error if there is no key
-				.and_then(|x| (!x.is_empty()).then_some(x).ok_or_else(no_key))
-				.or_else(|_| {
-					pkcs8_private_keys(&mut BufReader::new(File::open(&tls.key)?))
-						.map_err(invalid_key)
-						// return an error if there is no key
-						.and_then(|x| (!x.is_empty()).then_some(x).ok_or_else(no_key))
-				})
-				.or_else(|_| {
-					ec_private_keys(&mut BufReader::new(File::open(&tls.key)?))
-						.map_err(invalid_key)
-						// return an error if there is no key
-						.and_then(|x| (!x.is_empty()).then_some(x).ok_or_else(no_key))
-				})?
-				.into_iter()
-				.map(PrivateKey)
-				.collect();
-		let tls_config = config
-			.with_single_cert(crt_chain, keys.swap_remove(0))
+		let crt_chain = CertificateDer::pem_file_iter(&tls.crt)
+			.with_context(|| format!("unable to read {:?}", &tls.crt))?
+			.collect::<Result<Vec<_>, _>>()
+			.map_err(|e| anyhow!("error reading certificate: {}", e))?;
+		// first key found in RSA, PKCS8 or EC (SEC1) format
+		let key = PrivateKeyDer::from_pem_file(&tls.key)
+			.map_err(|e| anyhow!("invalid or no key in {:?}: {}", &tls.key, e))?;
+		let tls_config = ServerConfig::builder()
+			.with_no_client_auth()
+			.with_single_cert(crt_chain, key)
 			.with_context(|| "error setting crt/key pair")?;
 		server
-			.bind_rustls(&addrs, tls_config)
+			.bind_rustls_0_23(&addrs, tls_config)
 			.with_context(|| format!("unable to bind to https://{}", &addrs))?
 	} else {
 		log::warn!("TLS is not activated. Use only for development");

@@ -6,10 +6,10 @@ authors = ["Éric BURGHARD <eric.burghard@itsufficient.me>"]
 edition = "2021"
 
 [dependencies]
-actix-files = "0.6"
+actix-files = "0.7"
 actix-multipart = "0.8"
-actix-web = { version = "4", default-features = false, features = ["rustls"] }
-rustls = "0.20"
+actix-web = { version = "4", default-features = false, features = ["rustls-0_23"] }
+rustls = "0.23"
 anyhow = "1.0"
 argh = "0.1"
 chrono = "0.4"
@@ -19,20 +19,18 @@ log = "0.4"
 percent-encoding = "2.3"
 sanitize-filename = "0.6"
 serde = "1.0"
-serde_yaml = "0.9"
+serde_yaml_ng = "0.10"
 size_format = "1.0"
 tempfile = "3"
-v_htmlescape = "0.15"
+v_htmlescape = "1.0"
 actix-token-middleware = "0.3.0"
 actix-schemeredirect-middleware = "0.2"
-rustls-pemfile = "1.0"
 time = "0.3"
 tokio = { version = "1", features = ["fs", "io-util"] }
 
 [patch.crates-io]
-actix-schemeredirect-middleware = { git = "https://github.com/eburghar/actix-schemeredirect-middleware.git", branch = "master" }
-# actix-schemeredirect-middleware = { path = "../actix-schemeredirect-middleware" }
-actix-token-middleware = { git = "https://github.com/eburghar/actix-token-middleware.git", branch = "master" }
-# actix-token-middleware = { path = "../actix-token-middleware" }
+# vendored from github.com/eburghar (upstream inactive) to move them to rustls 0.23
+actix-schemeredirect-middleware = { path = "vendor/actix-schemeredirect-middleware" }
+actix-token-middleware = { path = "vendor/actix-token-middleware" }
 serde-vecmap = { git = "https://github.com/eburghar/serde-vecmap.git", branch = "master" }
 # serde-vecmap = { path = "../serde-vecmap" }

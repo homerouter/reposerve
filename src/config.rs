@@ -36,7 +36,7 @@ impl Config {
 		let file = File::open(config).with_context(|| format!("Can't open {}", &config))?;
 		// deserialize configuration
 		let config: Config =
-			serde_yaml::from_reader(file).with_context(|| format!("Can't read {}", &config))?;
+			serde_yaml_ng::from_reader(file).with_context(|| format!("Can't read {}", &config))?;
 		Ok(config)
 	}
 }
