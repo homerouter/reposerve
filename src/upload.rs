@@ -2,7 +2,7 @@ use crate::config::Config;
 
 use actix_multipart::Multipart;
 use actix_web::{
-	error::{ErrorBadRequest, ErrorInternalServerError},
+	error::{ErrorBadRequest, ErrorInternalServerError, ErrorPayloadTooLarge},
 	web::{self, BufMut, BytesMut},
 	Error, HttpResponse,
 };
@@ -15,6 +15,8 @@ use tokio::{io::AsyncWriteExt, process::Command};
 pub(crate) type UploadLock = tokio::sync::Mutex<()>;
 
 const MAX_FIELD_LEN: usize = 256;
+// shortcut: fixed cap on total apk bytes per request, make it configurable if bigger packages appear
+const MAX_UPLOAD_LEN: usize = 50 * 1024 * 1024;
 const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn sanitize_segment(raw: &str) -> Result<String, Error> {
@@ -284,6 +286,7 @@ async fn receive_multipart(
 ) -> Result<(ApkInfo, Vec<String>), Error> {
 	let mut info = ApkInfo::default();
 	let mut files = Vec::new();
+	let mut total = 0usize;
 	while let Some(mut field) = payload.try_next().await? {
 		let cd = field.content_disposition();
 		match cd.as_ref().and_then(|cd| cd.get_name()) {
@@ -306,6 +309,10 @@ async fn receive_multipart(
 
 				while let Some(chunk) = field.next().await {
 					let data = chunk?;
+					total += data.len();
+					if total > MAX_UPLOAD_LEN {
+						return Err(ErrorPayloadTooLarge("upload too large"));
+					}
 					f.write_all(&data).await.map_err(|e| {
 						log::error!("failed to write temp upload chunk: {e}");
 						ErrorInternalServerError("failed to save uploaded file")
@@ -526,6 +533,35 @@ mod tests {
 			let resp = test::call_service(&app, req).await;
 
 			assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+		});
+	}
+
+	#[test]
+	fn rejects_oversized_apk_upload() {
+		run_async(async {
+			let repo_dir = tempfile::tempdir().unwrap();
+			let app = test::init_service(
+				App::new()
+					.app_data(test_config(repo_dir.path()))
+					.app_data(web::Data::new(UploadLock::new(())))
+					.route("/upload", web::post().to(upload)),
+			)
+			.await;
+
+			let mut body = b"--BOUND\r\n\
+				Content-Disposition: form-data; name=\"file\"; filename=\"pkg-1.0-r0.apk\"\r\n\r\n"
+				.to_vec();
+			body.resize(body.len() + MAX_UPLOAD_LEN + 1, b'x');
+			body.extend_from_slice(b"\r\n--BOUND--\r\n");
+			let req = test::TestRequest::post()
+				.uri("/upload")
+				.insert_header(("Content-Type", "multipart/form-data; boundary=BOUND"))
+				.set_payload(body)
+				.to_request();
+			let resp = test::call_service(&app, req).await;
+
+			assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+			assert_eq!(fs::read_dir(repo_dir.path()).unwrap().count(), 0);
 		});
 	}
 
