@@ -20,7 +20,10 @@ impl DirEntry {
 			if let Ok(p) = entry.path().strip_prefix(&dir.path) {
 				return Some(DirEntry {
 					name: escape_html_entity(&entry.file_name().to_string_lossy()).to_string(),
-					url: utf8_percent_encode(&base.join(p).to_string_lossy(), CONTROLS).to_string(),
+					url: escape_html_entity(
+						&utf8_percent_encode(&base.join(p).to_string_lossy(), CONTROLS).to_string(),
+					)
+					.to_string(),
 					dt: metadata
 						.modified()
 						.unwrap_or(std::time::SystemTime::UNIX_EPOCH)
@@ -35,7 +38,7 @@ impl DirEntry {
 }
 
 pub fn directory_listing(dir: &Directory, req: &HttpRequest) -> Result<ServiceResponse, io::Error> {
-	let index_of = format!("Index of {}", req.path());
+	let index_of = format!("Index of {}", escape_html_entity(req.path()));
 	let mut body = String::new();
 	let base = Path::new(req.path());
 
@@ -54,7 +57,7 @@ pub fn directory_listing(dir: &Directory, req: &HttpRequest) -> Result<ServiceRe
 		let _ = write!(
 			body,
 			"<li><a href=\"{}\">../</a></li>",
-			utf8_percent_encode(&p.to_string_lossy(), CONTROLS)
+			escape_html_entity(&utf8_percent_encode(&p.to_string_lossy(), CONTROLS).to_string())
 		);
 	}
 
@@ -117,6 +120,7 @@ mod tests {
 			fs::create_dir(&sub).unwrap();
 			fs::write(sub.join("pkg-1.0.apk"), "abc").unwrap();
 			fs::write(sub.join("a<b.apk"), "x").unwrap();
+			fs::write(sub.join("q\"onmouseover=x.apk"), "x").unwrap();
 			fs::create_dir(sub.join(".stage-1234")).unwrap();
 
 			let app = test::init_service(
@@ -135,6 +139,8 @@ mod tests {
 			assert!(html.contains("pkg-1.0.apk"));
 			assert!(html.contains("a&lt;b.apk"));
 			assert!(!html.contains(".stage-1234"));
+			assert!(!html.contains("q\"onmouseover"));
+			assert!(!html.contains("a<b"));
 		});
 	}
 }
